@@ -10,6 +10,11 @@ from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
+try:
+    from nanobot.workspace.resolver import WorkspaceResolver
+except ImportError:
+    WorkspaceResolver = None  # type: ignore[misc, assignment]
+
 
 @dataclass
 class Session:
@@ -61,45 +66,55 @@ class Session:
 class SessionManager:
     """
     Manages conversation sessions.
-    
+
     Sessions are stored as JSONL files in the sessions directory.
+    Supports multi-workspace mode through WorkspaceResolver.
     """
-    
-    def __init__(self, workspace: Path):
+
+    def __init__(self, workspace: Path, workspace_resolver: "WorkspaceResolver | None" = None):
         self.workspace = workspace
+        self.workspace_resolver = workspace_resolver
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
         self._cache: dict[str, Session] = {}
     
-    def _get_session_path(self, key: str) -> Path:
+    def _get_session_path(self, key: str, user_id: str | None = None) -> Path:
         """Get the file path for a session."""
+        if self.workspace_resolver and user_id:
+            sessions_dir = self.workspace_resolver.get_sessions_dir(user_id)
+        else:
+            sessions_dir = self.sessions_dir
         safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / f"{safe_key}.jsonl"
-    
-    def get_or_create(self, key: str) -> Session:
+        return sessions_dir / f"{safe_key}.jsonl"
+
+    def get_or_create(self, key: str, user_id: str | None = None) -> Session:
         """
         Get an existing session or create a new one.
-        
+
         Args:
             key: Session key (usually channel:chat_id).
-        
+            user_id: Optional user ID for multi-workspace mode.
+
         Returns:
             The session.
         """
+        # Create a cache key that includes user_id if in multi-workspace mode
+        cache_key = f"{user_id}:{key}" if user_id else key
+
         # Check cache
-        if key in self._cache:
-            return self._cache[key]
-        
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         # Try to load from disk
-        session = self._load(key)
+        session = self._load(key, user_id)
         if session is None:
             session = Session(key=key)
-        
-        self._cache[key] = session
+
+        self._cache[cache_key] = session
         return session
-    
-    def _load(self, key: str) -> Session | None:
+
+    def _load(self, key: str, user_id: str | None = None) -> Session | None:
         """Load a session from disk."""
-        path = self._get_session_path(key)
+        path = self._get_session_path(key, user_id)
         
         if not path.exists():
             return None

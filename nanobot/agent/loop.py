@@ -1,5 +1,7 @@
 """Agent loop: the core processing engine."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 from pathlib import Path
@@ -20,6 +22,11 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
+
+try:
+    from nanobot.workspace.resolver import WorkspaceResolver
+except ImportError:
+    WorkspaceResolver = None  # type: ignore[misc, assignment]
 
 
 class AgentLoop:
@@ -46,6 +53,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        workspace_resolver: "WorkspaceResolver | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -58,8 +66,9 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        
-        self.context = ContextBuilder(workspace)
+        self.workspace_resolver = workspace_resolver
+
+        self.context = ContextBuilder(workspace, workspace_resolver=workspace_resolver)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -70,6 +79,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            workspace_resolver=workspace_resolver,
         )
         
         self._running = False
@@ -140,7 +150,23 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
-    
+
+    def _set_user_context(self, user_id: str | None) -> Path:
+        """
+        Update the workspace context for a specific user.
+
+        Args:
+            user_id: The user ID from message metadata.
+
+        Returns:
+            The workspace path for this user.
+        """
+        if self.workspace_resolver:
+            workspace = self.workspace_resolver.get_workspace(user_id)
+            self.context.set_workspace(workspace)
+            return workspace
+        return self.workspace
+
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a single inbound message.
@@ -158,22 +184,37 @@ class AgentLoop:
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
+        # Get user_id from metadata for multi-workspace support
+        user_id = msg.metadata.get("user_id")
+        workspace = self._set_user_context(user_id)
+
         # Get or create session
-        session = self.sessions.get_or_create(msg.session_key)
+        session = self.sessions.get_or_create(msg.session_key, user_id=user_id)
         
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
+
+        # Update filesystem tools with user workspace
+        for tool_name in ["read_file", "write_file", "edit_file", "list_dir"]:
+            tool = self.tools.get(tool_name)
+            if tool and hasattr(tool, "set_context"):
+                tool.set_context(user_id=user_id, workspace=workspace)
+
+        # Update shell tool with user workspace
+        exec_tool = self.tools.get("exec")
+        if exec_tool and hasattr(exec_tool, "set_context"):
+            exec_tool.set_context(user_id=user_id, workspace=workspace)
         
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
@@ -268,21 +309,36 @@ class AgentLoop:
             origin_chat_id = msg.chat_id
         
         # Use the origin session for context
+        # Get user_id from metadata if available (from subagent spawn)
+        user_id = msg.metadata.get("user_id")
+        workspace = self._set_user_context(user_id)
+
         session_key = f"{origin_channel}:{origin_chat_id}"
-        session = self.sessions.get_or_create(session_key)
-        
+        session = self.sessions.get_or_create(session_key, user_id=user_id)
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
+
+        # Update filesystem tools with user workspace
+        for tool_name in ["read_file", "write_file", "edit_file", "list_dir"]:
+            tool = self.tools.get(tool_name)
+            if tool and hasattr(tool, "set_context"):
+                tool.set_context(user_id=user_id, workspace=workspace)
+
+        # Update shell tool with user workspace
+        exec_tool = self.tools.get("exec")
+        if exec_tool and hasattr(exec_tool, "set_context"):
+            exec_tool.set_context(user_id=user_id, workspace=workspace)
         
         # Build messages with the announce content
         messages = self.context.build_messages(
@@ -353,16 +409,18 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """
-        Process a message directly (for CLI or cron usage).
-        
+        Process a message directly (for CLI, cron, or heartbeat usage).
+
         Args:
             content: The message content.
             session_key: Session identifier.
             channel: Source channel (for context).
             chat_id: Source chat ID (for context).
-        
+            metadata: Optional metadata (e.g., user_id for multi-workspace).
+
         Returns:
             The agent's response.
         """
@@ -370,8 +428,9 @@ class AgentLoop:
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            metadata=metadata or {}
         )
-        
+
         response = await self._process_message(msg)
         return response.content if response else ""

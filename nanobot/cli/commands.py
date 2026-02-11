@@ -332,23 +332,30 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    
+    from nanobot.workspace.resolver import WorkspaceResolver
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    
+
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+
+    # Create workspace resolver for multi-user support
+    workspace_resolver = WorkspaceResolver(
+        default_workspace=config.workspace_path,
+        multi_workspace=config.agents.defaults.multi_workspace,
+    )
+    session_manager = SessionManager(config.workspace_path, workspace_resolver=workspace_resolver)
     
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
+    # Create agent with cron service and workspace resolver
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -360,6 +367,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        workspace_resolver=workspace_resolver,
     )
     
     # Set cron callback (needs agent)
@@ -382,12 +390,20 @@ def gateway(
     cron.on_job = on_cron_job
     
     # Create heartbeat service
-    async def on_heartbeat(prompt: str) -> str:
-        """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
-    
+    async def on_heartbeat(prompt: str, user_id: str | None = None) -> str:
+        """Execute heartbeat through the agent for a specific user."""
+        # Use unique session key per user for heartbeat
+        session_key = f"heartbeat:{user_id}" if user_id else "heartbeat"
+
+        # Pass user_id to metadata so agent uses correct workspace
+        return await agent.process_direct(
+            prompt,
+            session_key=session_key,
+            metadata={"user_id": user_id} if user_id else {}
+        )
+
     heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
+        workspace=workspace_resolver,  # Pass resolver instead of Path
         on_heartbeat=on_heartbeat,
         interval_s=30 * 60,  # 30 minutes
         enabled=True
@@ -561,7 +577,7 @@ def channels_status():
         "✓" if dc.enabled else "✗",
         dc.gateway_url
     )
-    
+
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
@@ -569,6 +585,15 @@ def channels_status():
         "Telegram",
         "✓" if tg.enabled else "✗",
         tg_config
+    )
+
+    # WebSocket
+    ws = config.channels.websocket
+    ws_config = f"ws://{ws.host}:{ws.port}" if ws.enabled else ""
+    table.add_row(
+        "WebSocket",
+        "✓" if ws.enabled else "✗",
+        ws_config
     )
 
     console.print(table)

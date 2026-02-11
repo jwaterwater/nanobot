@@ -77,6 +77,18 @@ class EmailConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed sender email addresses
 
 
+class WebSocketConfig(BaseModel):
+    """WebSocket channel configuration for real-time multi-user chat."""
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8765
+    auth_required: bool = True
+    auth_tokens: dict[str, str] = Field(default_factory=dict)  # token -> user_id mapping
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs (empty = allow all)
+    heartbeat_interval: int = 30  # Seconds
+    max_message_size: int = 1024 * 1024  # 1MB
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
@@ -85,11 +97,13 @@ class ChannelsConfig(BaseModel):
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     dingtalk: DingTalkConfig = Field(default_factory=DingTalkConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
+    websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
 
 
 class AgentDefaults(BaseModel):
     """Default agent configuration."""
     workspace: str = "~/.nanobot/workspace"
+    multi_workspace: bool = False  # Enable per-user workspace isolation
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
     temperature: float = 0.7

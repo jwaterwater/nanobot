@@ -16,16 +16,21 @@ from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, ListDirT
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
+try:
+    from nanobot.workspace.resolver import WorkspaceResolver
+except ImportError:
+    WorkspaceResolver = None  # type: ignore[misc, assignment]
+
 
 class SubagentManager:
     """
     Manages background subagent execution.
-    
+
     Subagents are lightweight agent instances that run in the background
     to handle specific tasks. They share the same LLM provider but have
     isolated context and a focused system prompt.
     """
-    
+
     def __init__(
         self,
         provider: LLMProvider,
@@ -35,6 +40,7 @@ class SubagentManager:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        workspace_resolver: "WorkspaceResolver | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -44,6 +50,7 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.workspace_resolver = workspace_resolver
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(

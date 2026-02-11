@@ -11,7 +11,7 @@ from nanobot.agent.tools.base import Tool
 
 class ExecTool(Tool):
     """Tool to execute shell commands."""
-    
+
     def __init__(
         self,
         timeout: int = 60,
@@ -21,6 +21,7 @@ class ExecTool(Tool):
         restrict_to_workspace: bool = False,
     ):
         self.timeout = timeout
+        self._base_working_dir = working_dir
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
@@ -139,3 +140,16 @@ class ExecTool(Tool):
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
         return None
+
+    def set_context(self, user_id: str | None = None, workspace: "Path | None" = None) -> None:
+        """
+        Update the working directory based on user context.
+
+        Args:
+            user_id: Optional user ID for multi-workspace mode.
+            workspace: Optional explicit workspace path.
+        """
+        if workspace:
+            self.working_dir = str(workspace)
+        else:
+            self.working_dir = self._base_working_dir

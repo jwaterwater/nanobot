@@ -9,22 +9,44 @@ from typing import Any
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
+try:
+    from nanobot.workspace.resolver import WorkspaceResolver
+except ImportError:
+    WorkspaceResolver = None  # type: ignore[misc, assignment]
+
 
 class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
-    
+
     Assembles bootstrap files, memory, skills, and conversation history
     into a coherent prompt for the LLM.
+
+    Supports dynamic workspace switching via set_workspace() for multi-user mode.
     """
-    
+
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    
-    def __init__(self, workspace: Path):
+
+    def __init__(self, workspace: Path, workspace_resolver: "WorkspaceResolver | None" = None):
+        self._base_workspace = workspace
         self.workspace = workspace
+        self.workspace_resolver = workspace_resolver
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
     
+    def set_workspace(self, workspace: Path) -> None:
+        """
+        Set a new workspace for context building.
+
+        This is used in multi-workspace mode to switch between user workspaces.
+
+        Args:
+            workspace: Path to the new workspace directory.
+        """
+        self.workspace = workspace
+        self.memory = MemoryStore(workspace)
+        self.skills = SkillsLoader(workspace)
+
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.

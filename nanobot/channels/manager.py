@@ -106,6 +106,17 @@ class ChannelManager:
                 logger.info("Email channel enabled")
             except ImportError as e:
                 logger.warning(f"Email channel not available: {e}")
+
+        # WebSocket channel
+        if self.config.channels.websocket.enabled:
+            try:
+                from nanobot.channels.websocket import WebSocketChannel
+                self.channels["websocket"] = WebSocketChannel(
+                    self.config.channels.websocket, self.bus
+                )
+                logger.info("WebSocket channel enabled")
+            except ImportError as e:
+                logger.warning(f"WebSocket channel not available: {e}")
     
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
