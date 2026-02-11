@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -48,6 +49,12 @@ class WebSocketChannel(BaseChannel):
         self.allow_from = config.allow_from or []
         self.heartbeat_interval = config.heartbeat_interval
         self.max_message_size = config.max_message_size
+
+        # External auth API configuration
+        self.auth_api_url = config.auth_api_url
+        self.auth_api_timeout = config.auth_api_timeout
+        self.auth_api_mock = getattr(config, "auth_api_mock", True)
+        self.auth_mock_token = getattr(config, "auth_mock_token", "test_token_123")
 
         # Client management
         self._clients: dict[str, "WebSocketClient"] = {}
@@ -211,6 +218,11 @@ class WebSocketChannel(BaseChannel):
         """
         Authenticate a client connection.
 
+        Supports three authentication modes:
+        1. External API (auth_api_url configured): Send POST request with token
+        2. Local token mapping (auth_tokens): Fallback local verification
+        3. Mock mode (auth_api_mock=True): Accept any token for testing
+
         Returns:
             The user_id if authentication succeeds, None otherwise.
         """
@@ -219,28 +231,67 @@ class WebSocketChannel(BaseChannel):
         if msg_type != "auth":
             return None
 
-        # Get user_id from auth data
+        # Get user_id and token from auth data
         user_id = auth_data.get("user_id")
+        token = auth_data.get("token")
 
-        if not user_id:
+        if not token:
             return None
 
-        # Check if authentication is required
+        # Mode 1: External API authentication
+        if self.auth_api_url:
+            try:
+                payload = {"token": token}
+                if user_id:
+                    payload["user_id"] = user_id
+
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        self.auth_api_url,
+                        json=payload,
+                        timeout=self.auth_api_timeout
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        # Expected response: {"user_id": "...", "valid": true}
+                        if data.get("valid") and data.get("user_id"):
+                            logger.info(f"External auth success: token -> {data['user_id']}")
+                            return data["user_id"]
+
+                    logger.warning(f"External auth failed: status={response.status_code}")
+                    return None
+
+            except asyncio.TimeoutError:
+                logger.error(f"External auth timeout: {self.auth_api_url}")
+                return None
+            except Exception as e:
+                logger.error(f"External auth error: {e}")
+                # Fall through to mock/local mode as backup
+                if not self.auth_api_mock:
+                    return None
+
+        # Mode 2: Mock mode (for testing)
+        if self.auth_api_mock and self.auth_required:
+            # In mock mode, only accept the fixed mock token
+            if token == self.auth_mock_token:
+                # Use provided user_id or generate default mock user
+                mock_user_id = user_id or "mock_user_001"
+                logger.info(f"Mock auth success: token matched, user={mock_user_id}")
+                return mock_user_id
+            logger.warning(f"Mock auth failed: invalid token")
+            return None
+
+        # Mode 3: Local token mapping (original behavior)
         if self.auth_required:
-            token = auth_data.get("token")
-            if not token:
-                return None
-
-            # Verify token
             expected_user_id = self.auth_tokens.get(token)
-            if expected_user_id and expected_user_id != user_id:
-                # Token maps to a different user
+            if not expected_user_id:
                 return None
+            if user_id and expected_user_id != user_id:
+                return None
+            return expected_user_id
 
-            # If token exists in mapping, use its user_id
-            if expected_user_id:
-                user_id = expected_user_id
-
+        # No auth required, return provided user_id
         return user_id
 
     def _is_user_allowed(self, user_id: str) -> bool:
