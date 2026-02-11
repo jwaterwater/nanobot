@@ -112,7 +112,7 @@ class WebSocketChannel(BaseChannel):
         """
         Send a message to a WebSocket client.
 
-        The chat_id should be the client_id for WebSocket connections.
+        The chat_id is the user_id (also used as client_id for persistent session).
 
         Supports different message types via metadata:
         - type: "message" (default), "thinking", "tool_call", "tool_result", "error"
@@ -162,11 +162,9 @@ class WebSocketChannel(BaseChannel):
 
     async def _handle_connection(self, ws: "ServerConnection") -> None:
         """Handle a new WebSocket connection."""
-        client_id = str(uuid.uuid4())[:8]
-        client = WebSocketClient(client_id, ws)
-        self._clients[client_id] = client
-
-        logger.info(f"New WebSocket connection: {client_id}")
+        # Use temporary ID until authenticated
+        temp_id = str(uuid.uuid4())[:8]
+        logger.info(f"New WebSocket connection: {temp_id}")
 
         try:
             # Wait for authentication first
@@ -182,12 +180,18 @@ class WebSocketChannel(BaseChannel):
                 await self._send_error(ws, "Authentication failed")
                 return
 
+            # Use user_id as client_id for persistent session
+            client_id = user_id
+            client = WebSocketClient(client_id, ws)
             client.user_id = user_id
             client.authenticated = True
 
+            # Register client (overwrite if same user reconnects)
+            self._clients[client_id] = client
+
             # Send connected confirmation
             await self._send_connected(ws, client_id, user_id)
-            logger.info(f"Client authenticated: {client_id} -> user: {user_id}")
+            logger.info(f"Client authenticated: {client_id}")
 
             # Check authorization
             if not self._is_user_allowed(user_id):
@@ -311,7 +315,7 @@ class WebSocketChannel(BaseChannel):
 
             await self._handle_message(
                 sender_id=client.user_id,
-                chat_id=client.client_id,  # Use client_id as chat_id for routing
+                chat_id=client.user_id,  # Use user_id as chat_id for persistent session
                 content=content,
                 metadata={"user_id": client.user_id, "client_id": client.client_id},
             )
