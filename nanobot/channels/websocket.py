@@ -61,6 +61,9 @@ class WebSocketChannel(BaseChannel):
         self._server: Any = None
         self._shutdown = asyncio.Event()
 
+        # Log auth configuration for debugging
+        logger.info(f"WebSocket auth config: api_url={self.auth_api_url}, mock={self.auth_api_mock}")
+
     async def start(self) -> None:
         """Start the WebSocket server."""
         self._shutdown.clear()
@@ -162,9 +165,8 @@ class WebSocketChannel(BaseChannel):
 
     async def _handle_connection(self, ws: "ServerConnection") -> None:
         """Handle a new WebSocket connection."""
-        # Use temporary ID until authenticated
-        temp_id = str(uuid.uuid4())[:8]
-        logger.info(f"New WebSocket connection: {temp_id}")
+        client: "WebSocketClient | None" = None
+        client_id: str | None = None
 
         try:
             # Wait for authentication first
@@ -213,10 +215,12 @@ class WebSocketChannel(BaseChannel):
         except websockets.exceptions.ConnectionClosed:
             logger.debug(f"Connection closed: {client_id}")
         except Exception as e:
-            logger.error(f"Error in connection handler for {client_id}: {e}")
+            logger.error(f"Error in connection handler: {e}")
         finally:
-            self._clients.pop(client_id, None)
-            logger.debug(f"Client removed: {client_id}")
+            # Clean up registered client
+            if client_id:
+                self._clients.pop(client_id, None)
+                logger.debug(f"Client removed: {client_id}")
 
     async def _authenticate(self, auth_data: dict[str, Any]) -> str | None:
         """
@@ -240,30 +244,32 @@ class WebSocketChannel(BaseChannel):
         token = auth_data.get("token")
 
         if not token:
+            logger.warning("Auth failed: no token provided")
             return None
 
         # Mode 1: External API authentication
         if self.auth_api_url:
+            logger.info(f"Attempting external auth: {self.auth_api_url}")
             try:
-                payload = {"token": token}
-                if user_id:
-                    payload["user_id"] = user_id
-
+                headers = {"AuthToken": token}
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(
+                    response = await client.get(
                         self.auth_api_url,
-                        json=payload,
+                        headers=headers,
                         timeout=self.auth_api_timeout
                     )
 
                     if response.status_code == 200:
                         data = response.json()
-                        # Expected response: {"user_id": "...", "valid": true}
-                        if data.get("valid") and data.get("user_id"):
-                            logger.info(f"External auth success: token -> {data['user_id']}")
-                            return data["user_id"]
+                        # Expected response: {"code": 0, "data": {"uid": 123, ...}}
+                        if data.get("code") == 0 and data.get("data"):
+                            user_data = data["data"]
+                            uid = str(user_data.get("uid", ""))
+                            if uid:
+                                logger.info(f"External auth success: token -> uid={uid}, nickname={user_data.get('nickname')}")
+                                return uid
 
-                    logger.warning(f"External auth failed: status={response.status_code}")
+                    logger.warning(f"External auth failed: status={response.status_code}, response={response.text[:200]}")
                     return None
 
             except asyncio.TimeoutError:
@@ -277,6 +283,7 @@ class WebSocketChannel(BaseChannel):
 
         # Mode 2: Mock mode (for testing)
         if self.auth_api_mock and self.auth_required:
+            logger.info(f"Using mock auth mode (mock={self.auth_api_mock}, token={token[:8]}...)")
             # In mock mode, only accept the fixed mock token
             if token == self.auth_mock_token:
                 # Use provided user_id or generate default mock user

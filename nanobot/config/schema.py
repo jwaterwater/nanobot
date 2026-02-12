@@ -89,9 +89,9 @@ class WebSocketConfig(BaseModel):
     max_message_size: int = 1024 * 1024  # 1MB
 
     # External auth API configuration
-    auth_api_url: str | None = None  # External auth API endpoint (e.g., "http://localhost:3000/api/auth")
+    auth_api_url: str | None = None  # External auth API endpoint (e.g., "https://word.gogogo.club/api/user/info")
     auth_api_timeout: int = 5  # API request timeout in seconds
-    auth_api_mock: bool = True  # Use mock mode (for testing before real API is ready)
+    auth_api_mock: bool = False  # Use mock mode (for testing before real API is ready)
     auth_mock_token: str = "test_token_123"  # Fixed token for mock mode testing
 
 
