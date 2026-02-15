@@ -136,9 +136,14 @@ class WebSocketChannel(BaseChannel):
             # Get message type from metadata (default: "message")
             msg_type = msg.metadata.get("type", "message")
 
+            # Append [AI生成] suffix to AI-generated messages
+            content = msg.content
+            if msg_type == "message":
+                content = f"{content}[AI生成]"
+
             response = {
                 "type": msg_type,
-                "content": msg.content,
+                "content": content,
                 "timestamp": datetime.now().isoformat(),
             }
 
